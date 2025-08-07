@@ -2,15 +2,27 @@ import asyncio
 import csv
 import os
 from datetime import datetime
-from typing import List, Dict, Optional
-import base64
+from typing import List, Dict
 
 from dotenv import load_dotenv
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.types import MemcmpOpts, DataSliceOpts
 from solders.pubkey import Pubkey
 from solders.signature import Signature
-# import aiohttp
+
+
+TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+
+def get_associated_token_address(mint: str, owner: str) -> str:
+    """Get the associated token address for a given mint and owner"""
+    address, _ = Pubkey.find_program_address(seeds=[
+        bytes(Pubkey.from_string(owner)),
+        bytes(TOKEN_PROGRAM_ID),
+        bytes(Pubkey.from_string(mint))
+    ], program_id=ASSOCIATED_TOKEN_PROGRAM_ID)
+
+    return str(address)
 
 class TokenTransferExtractor:
     def __init__(self, token_mint:str, rpc_url: str = "https://api.mainnet-beta.solana.com"):
@@ -47,8 +59,7 @@ class TokenTransferExtractor:
             return accounts
             
         except Exception as e:
-            print(e.__cause__)
-            print(f"Error getting token accounts: {e}")
+            print(f"Error getting token accounts: {e.__cause__} {e}")
             return []
     
     async def get_account_transactions(self, account: str, limit: int = 1000) -> List[Dict]:
@@ -70,7 +81,7 @@ class TokenTransferExtractor:
             ]
             
         except Exception as e:
-            print(f"Error getting signatures for {account}: {e}")
+            print(f"Error getting signatures for {account}: {e.__cause__} {e}")
             return []
     
     async def parse_transaction(self, signature: str) -> List[Dict]:
@@ -83,49 +94,56 @@ class TokenTransferExtractor:
             )
             
             if not response.value:
+                # print(f"Transaction: {signature} not found or invalid")
                 return []
             
             tx = response.value
             
             # Parse the transaction for token transfers
-            transfers = []
+            transfers= []
             
             # Check if transaction was successful
             if tx.transaction.meta and tx.transaction.meta.err:
+                # print(f"Transaction {signature} failed with error: {str(tx.transaction.meta.err)}")
                 return []
             
             # Parse token balances changes
             if tx.transaction.meta and tx.transaction.meta.pre_token_balances and tx.transaction.meta.post_token_balances:
                 pre_balances = {bal.account_index: bal for bal in tx.transaction.meta.pre_token_balances}
                 post_balances = {bal.account_index: bal for bal in tx.transaction.meta.post_token_balances}
-                
+
                 # Find balance changes for  token
                 for account_index, post_bal in post_balances.items():
-                    if post_bal.mint == self.token_mint:
+
+                    if post_bal.mint == Pubkey.from_string(self.token_mint):
                         pre_bal = pre_balances.get(account_index)
-                        
                         if pre_bal:
                             pre_amount = int(pre_bal.ui_token_amount.amount)
                             post_amount = int(post_bal.ui_token_amount.amount)
                             change = post_amount - pre_amount
                             
-                            if change != 0:
-                                transfers.append({
+                            if change != 0: 
+                                transfer = {
                                     'signature': signature,
                                     'slot': tx.slot,
                                     'block_time': datetime.fromtimestamp(tx.block_time) if tx.block_time else None,
-                                    'account': str(tx.transaction.transaction.message.account_keys[account_index]),
+                                    'account': get_associated_token_address(self.token_mint, str(post_bal.owner or Pubkey.default())),
+                                    'owner': str(post_bal.owner or Pubkey.default()),
                                     'amount_change': change,
                                     'amount_change_ui': change / (10 ** post_bal.ui_token_amount.decimals),
                                     'pre_balance': pre_amount,
                                     'post_balance': post_amount,
                                     'decimals': post_bal.ui_token_amount.decimals
-                                })
+                                }
+                                # print("Transfer found:", transfer)
+                                transfers.append(transfer)
+                                
+            print(f"Transaction {signature}: Found {len(transfers)} transfers")
             
-            return transfers if transfers else []
+            return transfers
             
         except Exception as e:
-            print(f"Error parsing transaction {signature}: {e}")
+            print(f"Error parsing transaction {signature}: {e.__cause__} {e}")
             return []
     
     async def extract_all_transfers(self, max_accounts: int = 100, max_tx_per_account: int = 1000) -> List[Dict]:
@@ -133,7 +151,7 @@ class TokenTransferExtractor:
         print("Getting  token accounts...")
         token_accounts = await self.get_token_accounts()
         
-        if not token_accounts:
+        if len(token_accounts) == 0:
             print("No token accounts found. Please verify the  mint address.")
             return []
         
@@ -182,12 +200,12 @@ class TokenTransferExtractor:
     
     async def save_to_csv(self, transfers: List[Dict], filename: str = "token_transfers.csv"):
         """Save transfers to CSV file"""
-        if not transfers:
+        if len(transfers) == 0:
             print("No transfers to save")
             return
         
         fieldnames = [
-            'signature', 'slot', 'block_time', 'account', 
+            'signature', 'slot', 'block_time', 'account', 'owner',
             'amount_change', 'amount_change_ui', 'pre_balance', 
             'post_balance', 'decimals'
         ]
