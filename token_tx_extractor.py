@@ -243,8 +243,8 @@ async def main():
         return
 
     parser = argparse.ArgumentParser(description='Solana Token Transfer Extractor')
-    parser.add_argument('mint', type=str, help='Token mint address to extract transfers for')
-    parser.add_argument('-u' , '--user', type=str, help='User address to filter transfers for', default=None)
+    parser.add_argument('mint', type=str, help='Token mint address to extract transfers')
+    parser.add_argument('-u' , '--user', type=str, help='User address to filter transfers. If not given transfer will include all users\' transfers', default=None)
     parser.add_argument('-f' , '--filename', type=str, help='Filename to save transfer data. No need to include file extension.', default="token_transfers")
     parser.add_argument('-a', '--max_accounts', type=int, help='Maximum number of accounts to process', default=100000)
     parser.add_argument('-t', '--max_tx_per_account', type=int, help='Maximum transactions per account to process', default=1000)
