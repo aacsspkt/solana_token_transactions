@@ -4,28 +4,30 @@ import os
 from datetime import datetime
 from typing import List, Dict
 
+from construct import max_
 from dotenv import load_dotenv
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.types import MemcmpOpts, DataSliceOpts
 from solders.pubkey import Pubkey
 from solders.signature import Signature
+import argparse
 
 
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 
-def get_associated_token_address(mint: str, owner: str) -> str:
+def get_associated_token_address(mint: Pubkey, owner: Pubkey) -> Pubkey:
     """Get the associated token address for a given mint and owner"""
     address, _ = Pubkey.find_program_address(seeds=[
-        bytes(Pubkey.from_string(owner)),
+        bytes(owner),
         bytes(TOKEN_PROGRAM_ID),
-        bytes(Pubkey.from_string(mint))
+        bytes(mint)
     ], program_id=ASSOCIATED_TOKEN_PROGRAM_ID)
 
-    return str(address)
+    return address
 
 class TokenTransferExtractor:
-    def __init__(self, token_mint:str, rpc_url: str = "https://api.mainnet-beta.solana.com"):
+    def __init__(self, token_mint:Pubkey, rpc_url: str):
         """
         Initialize the Token transfer extractor
         
@@ -35,20 +37,27 @@ class TokenTransferExtractor:
         self.client = AsyncClient(rpc_url)
         self.token_mint = token_mint
         
-    async def get_token_accounts(self) -> List[str]:
+    async def get_token_accounts(self, user: Pubkey | None) -> List[str]:
         """Get all token accounts that hold  tokens"""
         try:
+            filters = filters=[
+                    165,
+                    MemcmpOpts(
+                    0,
+                    str(self.token_mint)
+                    ),
+                ]
+
+            if user is not None:
+                filters.append( MemcmpOpts(
+                        32,
+                        str(user)  # Filter by user address
+                    ))
             # Get all token accounts for the  mint
             response = await self.client.get_program_accounts(
                 pubkey=Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),  # SPL Token program
                 data_slice=DataSliceOpts(0, 64),
-                filters=[
-                    165,
-                    MemcmpOpts(
-                    0,
-                    self.token_mint
-                    ),
-                ]
+                filters=filters
             )
             # print("response", response)
             
@@ -115,7 +124,7 @@ class TokenTransferExtractor:
                 # Find balance changes for  token
                 for account_index, post_bal in post_balances.items():
 
-                    if post_bal.mint == Pubkey.from_string(self.token_mint):
+                    if post_bal.mint == self.token_mint:
                         pre_bal = pre_balances.get(account_index)
                         if pre_bal:
                             pre_amount = int(pre_bal.ui_token_amount.amount)
@@ -127,13 +136,12 @@ class TokenTransferExtractor:
                                     'signature': signature,
                                     'slot': tx.slot,
                                     'block_time': datetime.fromtimestamp(tx.block_time) if tx.block_time else None,
-                                    'account': get_associated_token_address(self.token_mint, str(post_bal.owner or Pubkey.default())),
+                                    'account': str(get_associated_token_address(mint=self.token_mint, owner=post_bal.owner or Pubkey.default())),
                                     'owner': str(post_bal.owner or Pubkey.default()),
                                     'amount_change': change,
                                     'amount_change_ui': change / (10 ** post_bal.ui_token_amount.decimals),
                                     'pre_balance': pre_amount,
                                     'post_balance': post_amount,
-                                    'decimals': post_bal.ui_token_amount.decimals
                                 }
                                 # print("Transfer found:", transfer)
                                 transfers.append(transfer)
@@ -146,10 +154,10 @@ class TokenTransferExtractor:
             print(f"Error parsing transaction {signature}: {e.__cause__} {e}")
             return []
     
-    async def extract_all_transfers(self, max_accounts: int = 100, max_tx_per_account: int = 1000) -> List[Dict]:
+    async def extract_all_transfers(self, user: Pubkey, max_accounts: int = 100, max_tx_per_account: int = 1000) -> List[Dict]:
         """Extract all  token transfers"""
         print("Getting  token accounts...")
-        token_accounts = await self.get_token_accounts()
+        token_accounts = await self.get_token_accounts(user=user)
         
         if len(token_accounts) == 0:
             print("No token accounts found. Please verify the  mint address.")
@@ -198,7 +206,7 @@ class TokenTransferExtractor:
         
         return all_transfers
     
-    async def save_to_csv(self, transfers: List[Dict], filename: str = "token_transfers.csv"):
+    async def save_to_csv(self, transfers: List[Dict], filename: str):
         """Save transfers to CSV file"""
         if len(transfers) == 0:
             print("No transfers to save")
@@ -207,7 +215,7 @@ class TokenTransferExtractor:
         fieldnames = [
             'signature', 'slot', 'block_time', 'account', 'owner',
             'amount_change', 'amount_change_ui', 'pre_balance', 
-            'post_balance', 'decimals'
+            'post_balance'
         ]
         
         with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
@@ -229,26 +237,59 @@ async def main():
     load_dotenv()
 
     RPC_URL = os.getenv("RPC_URL")
-    TOKEN_MINT = os.getenv("TOKEN_MINT")
 
-    if not RPC_URL or not TOKEN_MINT:
-        print("Please set RPC_URL and TOKEN_MINT in the .env file")
+    if not RPC_URL:
+        print("Please set RPC_URL in the .env file")
         return
 
+    parser = argparse.ArgumentParser(description='Solana Token Transfer Extractor')
+    parser.add_argument('mint', type=str, help='Token mint address to extract transfers for')
+    parser.add_argument('-u' , '--user', type=str, help='User address to filter transfers for', default=None)
+    parser.add_argument('-f' , '--filename', type=str, help='Filename to save transfer data. No need to include file extension.', default="token_transfers")
+    parser.add_argument('-a', '--max_accounts', type=int, help='Maximum number of accounts to process', default=100000)
+    parser.add_argument('-t', '--max_tx_per_account', type=int, help='Maximum transactions per account to process', default=1000)
+    args = parser.parse_args()
+
+    token_mint = args.mint
+    user = args.user
+    filename = str(args.filename)
+    max_accounts = int(args.max_accounts)
+    max_tx_per_account = int(args.max_tx_per_account)
+
+
+    if not token_mint:
+        print("Please provide a token mint address using -m or --mint")
+        return
+
+    if max_accounts < 1:
+        print("max_accounts must be at least 1")
+        return
+
+    if max_tx_per_account < 1:
+        print("max_tx_per_account must be at least 1")
+        return
+
+    filename = f"{filename}.csv" 
+    token_mint = Pubkey.from_string(token_mint)
+
+    if user:
+        user = Pubkey.from_string(user)
+    
     # Initialize the extractor
-    extractor = TokenTransferExtractor(token_mint=TOKEN_MINT, rpc_url=RPC_URL)
+    extractor = TokenTransferExtractor(token_mint=token_mint, rpc_url=RPC_URL)
     
     try:
         print("Starting  token transfer extraction...")
         
         # Extract all transfers
         transfers = await extractor.extract_all_transfers(
-            max_accounts=1,  # Adjust based on your needs
-            max_tx_per_account=1000  # Adjust based on your needs
+            user=user,
+            max_accounts=max_accounts,  # Adjust based on your needs
+            max_tx_per_account=max_tx_per_account  # Adjust based on your needs
         )
         
         # Save to CSV
-        await extractor.save_to_csv(transfers)
+        await extractor.save_to_csv(transfers, filename)
         
         print(f"Extraction complete! Found {len(transfers)} total transfers")
         
