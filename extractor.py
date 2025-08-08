@@ -119,7 +119,8 @@ class TokenTransferExtractor:
         return all_signatures
     
     async def parse_transaction_for_transfer(
-        self, 
+        self,
+        index: int, 
         signature: str, 
         sender: Optional[Pubkey], 
         receiver: Optional[Pubkey]
@@ -199,7 +200,7 @@ class TokenTransferExtractor:
                                     transfers.append(transfer)
                                     
             # if len(transfers) > 0:
-            print(f"  Transaction {signature}: Found {len(transfers)} transfers")
+            print(f"  Transaction ({index}) {signature}: Found {len(transfers)} transfers")
             
             return transfers
             
@@ -285,13 +286,13 @@ class TokenTransferExtractor:
                 processed_signatures.add(signature)
                 
                 # Parse transaction for sender-receiver transfers
-                transfers = await self.parse_transaction_for_transfer(signature, sender, receiver)
+                transfers = await self.parse_transaction_for_transfer(j + 1, signature, sender, receiver)
                 
                 if len(transfers) > 0:
                     all_transfers.extend(transfers)
                 
                 # Add small delay to avoid rate limiting
-                await asyncio.sleep(0.1)
+                # await asyncio.sleep(0.01)
         
         return all_transfers
     
