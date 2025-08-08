@@ -4,7 +4,6 @@ import os
 from datetime import datetime
 from typing import List, Dict, Optional
 
-from construct import max_
 from dotenv import load_dotenv
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.types import MemcmpOpts, DataSliceOpts
@@ -73,22 +72,58 @@ class TokenTransferExtractor:
             print(e)
             return []
     
-    async def get_account_transactions(self, account: str, limit: int = 1000) -> List[str]:
-        """Get transaction signatures for a specific account"""
+    async def get_all_account_transactions(self, account: str, limit_per_batch: int = 1000) -> List[Dict]:
+        """Get all transaction signatures for a specific account by paginating through results"""
+        all_signatures: List[Dict] = []
+        before_signature = None
+        
         try:
-            response = await self.client.get_signatures_for_address(
-                Pubkey.from_string(account),
-                limit=limit
-            )
-            
-            return [str(sig.signature) for sig in response.value]
-            
+            while True:
+                # Get batch of signatures
+                response = await self.client.get_signatures_for_address(
+                    Pubkey.from_string(account),
+                    before=before_signature,
+                    limit=limit_per_batch
+                )
+                
+                # Extract signatures from response
+                batch_signatures = [{
+                    "signature": str(sig.signature),
+                    "slot": sig.slot,
+                    "block_time": sig.block_time
+                    } for sig in response.value]
+
+                
+                # Add signatures to our collection
+                if len(batch_signatures) > 0:
+                    all_signatures.extend(batch_signatures)
+                    print(f"  Fetched {len(batch_signatures)} signatures. Total so far: {len(all_signatures)}")
+                
+                # If no signatures returned or we got fewer signatures than requested, we've reached the end
+                if len(batch_signatures) == 0 or len(batch_signatures) < limit_per_batch:
+                    break
+                    
+                
+                # Set the before parameter to the last signature for next iteration
+                # Since signatures are returned in reverse chronological order,
+                # the last one is the oldest in this batch
+                before_signature = response.value[-1].signature
+                
+                
         except Exception as e:
             print(f"Error getting signatures for {account}: {e.__cause__}")
             print(e)
-            return []
+            return all_signatures  # Return what we've collected so far
+        
+        # print(f"Finished fetching. Total signatures collected: {len(all_signatures)}")
+        return all_signatures
     
-    async def parse_transaction_for_transfer(self, signature: str, sender: Optional[Pubkey], receiver: Optional[Pubkey]) -> List[Dict]:
+    async def parse_transaction_for_transfer(
+        self, 
+        signature: str, 
+        sender: Optional[Pubkey], 
+        receiver: Optional[Pubkey]
+    ) -> List[Dict]:
         """Parse a transaction to extract token transfer details between sender and receiver"""
         try:
             # Get transaction details
@@ -173,23 +208,39 @@ class TokenTransferExtractor:
             print(e)
             return []
     
-    async def extract_sender_receiver_transfers(self, sender: Optional[Pubkey], receiver: Optional[Pubkey], max_accounts: int = 100000, max_tx_per_account: int = 1000) -> List[Dict]:
+    async def extract_sender_receiver_transfers(
+        self, 
+        sender: Optional[Pubkey], 
+        receiver: Optional[Pubkey], 
+        max_accounts: int = 100000, 
+        max_tx_per_account: int = 1000
+    ) -> List[Dict]:
         """Extract token transfers between sender and receiver"""
         
         # Get token accounts for both sender and receiver if specified
         accounts_to_process = set()
-        
-        if sender:
+
+        # If sender specified, get their token accounts
+        if sender and not receiver:
             print(f"Getting token accounts for sender: {sender}")
             sender_accounts = await self.get_token_accounts(user=sender)
             accounts_to_process.update(sender_accounts)
             print(f"Found {len(sender_accounts)} sender token accounts")
-        
-        if receiver:
+
+        # If receiver specified, get their token accounts        
+        if not sender and receiver:
             print(f"Getting token accounts for receiver: {receiver}")
             receiver_accounts = await self.get_token_accounts(user=receiver)
             accounts_to_process.update(receiver_accounts)
             print(f"Found {len(receiver_accounts)} receiver token accounts")
+
+        # If both sender and receiver specified, get only sender's accounts as sender's account will 
+        # have transactions related to receiver
+        if sender and receiver:
+            print(f"Getting token accounts for sender: {sender}")
+            sender_accounts = await self.get_token_accounts(user=sender)
+            accounts_to_process.update(sender_accounts)
+            print(f"Found {len(sender_accounts)} sender token accounts")
         
         # If neither sender nor receiver specified, get all token accounts
         if not sender and not receiver:
@@ -216,7 +267,7 @@ class TokenTransferExtractor:
             print(f"Processing account {i+1}/{len(accounts_list)}: {account}")
             
             # Get transaction signatures for this account
-            signatures = await self.get_account_transactions(account, max_tx_per_account)
+            signatures = await self.get_all_account_transactions(account, max_tx_per_account)
             
             if len(signatures) == 0:
                 continue
@@ -224,7 +275,8 @@ class TokenTransferExtractor:
             print(f"  Found {len(signatures)} transactions")
             
             # Process each transaction
-            for j, signature in enumerate(signatures):                
+            for j, sig_info in enumerate(signatures):  
+                signature = sig_info['signature']              
                 # Skip if already processed
                 if signature in processed_signatures:
                     print(f"  Skipping already processed signature: {signature}")
